@@ -1,0 +1,12 @@
+[Unit]
+Description=Run user hooks on NetworkManager connectivity changes
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/nm-connectivity-hooks
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

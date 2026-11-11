@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# © Stefan Huber, 2026-11-11
+# License: GPLv3+ (http://www.gnu.org/licenses/gpl-3.0.html)
+#
+# Hook for nm-connectivity-hooks that takes Akonadi resources offline while
+# there is no full connectivity and brings them back online afterwards.
+#
+# Motivation: The Akonadi EWS resource (Exchange, Office 365) does not back off
+# when the network is unreachable. On a WiFi without uplink it retries in a
+# tight loop, logging thousands of "Failed to process EWS request: Network
+# unreachable" per second and burning CPU.
+#
+# The resources are selected by the glob patterns in AKONADI_RESOURCES
+# (space-separated), which can be exported in nm-connectivity-hooks.conf:
+#
+#   export AKONADI_RESOURCES="akonadi_ews_resource_*"
+#
+# Only resources that were online are taken offline, and only those are
+# brought back online. They are remembered in
+# $XDG_STATE_HOME/nm-connectivity-hooks/akonadi-offline, so a resource you
+# took offline yourself stays offline.
+
+NEW_STATE=$1
+
+if [[ -z "$AKONADI_RESOURCES" ]]; then
+  AKONADI_RESOURCES="akonadi_ews_resource_*"
+fi
+if [[ -z "$XDG_STATE_HOME" ]]; then
+  XDG_STATE_HOME="$HOME/.local/state"
+fi
+STATE_FILE="$XDG_STATE_HOME/nm-connectivity-hooks/akonadi-offline"
+
+AGENT_PREFIX="org.freedesktop.Akonadi.Agent."
+
+# Prints the identifiers of all running Akonadi agents that match one of the
+# patterns in AKONADI_RESOURCES
+function matching_agents() {
+  local name id pattern
+  for name in $(gdbus call --session --dest org.freedesktop.DBus \
+    --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames |
+    tr -d "(),[]'"); do
+    if [[ "$name" != "$AGENT_PREFIX"* ]]; then
+      continue
+    fi
+    id=${name#"$AGENT_PREFIX"}
+    for pattern in $AKONADI_RESOURCES; do
+      # shellcheck disable=SC2053
+      if [[ "$id" == $pattern ]]; then
+        echo "$id"
+        break
+      fi
+    done
+  done
+}
+
+# Calls a method of the Agent.Status interface of agent $1
+function agent_status_call() {
+  local id=$1
+  shift
+  gdbus call --session --dest "$AGENT_PREFIX$id" --object-path / \
+    --method "org.freedesktop.Akonadi.Agent.Status.$1" "${@:2}"
+}
+
+function take_offline() {
+  local id
+  mkdir -p "$(dirname "$STATE_FILE")"
+  for id in $(matching_agents); do
+    if [[ "$(agent_status_call "$id" isOnline)" == "(true,)" ]]; then
+      echo "Taking $id offline"
+      agent_status_call "$id" setOnline false >/dev/null &&
+        echo "$id" >>"$STATE_FILE"
+    fi
+  done
+}
+
+function bring_online() {
+  local id failed=()
+  if [[ ! -f "$STATE_FILE" ]]; then
+    return
+  fi
+  for id in $(sort -u "$STATE_FILE"); do
+    echo "Bringing $id online"
+    # Remember the agent for the next run if it is not running, e.g., because
+    # Akonadi has not been started yet
+    if ! agent_status_call "$id" setOnline true >/dev/null; then
+      failed+=("$id")
+    fi
+  done
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    printf '%s\n' "${failed[@]}" >"$STATE_FILE"
+  else
+    rm -f "$STATE_FILE"
+  fi
+}
+
+case "$NEW_STATE" in
+full)
+  bring_online
+  ;;
+none | portal | limited)
+  take_offline
+  ;;
+*)
+  # Unknown, e.g., connectivity checking disabled in NetworkManager: do nothing
+  ;;
+esac

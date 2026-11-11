@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# © Stefan Huber, 2026-11-11
+# License: GPLv3+ (http://www.gnu.org/licenses/gpl-3.0.html)
+#
+# This script runs user hook scripts whenever the connectivity state of
+# NetworkManager changes, e.g., when a WiFi is connected but has no uplink to
+# the internet (state "limited" or "portal").
+#
+# The NetworkManager dispatcher already provides a connectivity-change event,
+# but its scripts run as root and outside the user session. This script instead
+# runs as a systemd user unit, so the hooks have access to the session bus, the
+# desktop notifications, and so on.
+#
+# It listens on the system D-Bus for changes of the Connectivity property of
+# NetworkManager. On every change -- and once at startup -- it runs all
+# executable files in the hook directory in alphabetical order:
+#
+#   HOOK NEW_STATE OLD_STATE
+#
+# where the states are one of unknown, none, portal, limited, full. OLD_STATE
+# is empty at startup. The states are also exported as NM_CONNECTIVITY_STATE
+# and NM_CONNECTIVITY_OLD_STATE. Hooks should be idempotent.
+#
+# It is configured through a config file at xdg config home
+# ($XDG_CONFIG_HOME/nm-connectivity-hooks.conf), e.g.
+# ~/.config/nm-connectivity-hooks.conf, and allows for the following configs
+# and defaults:
+#
+#   HOOK_DIR="$XDG_CONFIG_HOME/nm-connectivity-hooks/hooks.d"
+#   SETTLE_TIME=3
+#
+# SETTLE_TIME is the number of seconds a new state must persist before the
+# hooks are run. Variables exported in the config file are visible to hooks.
+#
+# The following comand line arguments are supported:
+#  -h, --help: Show this help message and exit
+#  --config-file FILE: Specify a custom configuration file
+#  --hook-dir DIR: Override the hook directory
+#  --settle-time SECS: Override the settle time
+#  --run-hooks NEW [OLD]: Run the hooks once with the given states and exit
+
+function help() {
+  echo "Usage: $0 [OPTIONS]"
+  echo "Options:"
+  echo "  -h, --help             Show this help message and exit"
+  echo "  --config-file FILE     Specify a custom configuration file"
+  echo "  --hook-dir DIR         Override the hook directory"
+  echo "  --settle-time SECS     Override the settle time in seconds"
+  echo "  --run-hooks NEW [OLD]  Run the hooks once with the given states and exit"
+}
+
+function read_config() {
+  if [[ -f "$1" ]]; then
+    # shellcheck source=/dev/null
+    source "$1"
+  else
+    echo "Config file $1 not found. Using default values."
+  fi
+}
+
+########################################################################
+# Handling command line arguments and set up configuration
+
+# If XDG_CONFIG_HOME not set, default to ~/.config
+if [[ -z "$XDG_CONFIG_HOME" ]]; then
+  XDG_CONFIG_HOME="$HOME/.config"
+fi
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+  -h | --help)
+    help
+    exit 0
+    ;;
+  --config-file)
+    shift
+    CONFIG_FILE=$1
+    ;;
+  --hook-dir)
+    shift
+    OPT_HOOK_DIR=$1
+    ;;
+  --settle-time)
+    shift
+    OPT_SETTLE_TIME=$1
+    ;;
+  --run-hooks)
+    shift
+    RUN_HOOKS=1
+    RUN_HOOKS_NEW=$1
+    if [[ "$#" -gt 1 && "$2" != -* ]]; then
+      shift
+      RUN_HOOKS_OLD=$1
+    fi
+    ;;
+  *)
+    echo "Unknown option: $1"
+    help
+    exit 1
+    ;;
+  esac
+  shift
+done
+
+# Read config
+if [[ -z "$CONFIG_FILE" ]]; then
+  CONFIG_FILE="$XDG_CONFIG_HOME/nm-connectivity-hooks.conf"
+fi
+read_config "$CONFIG_FILE"
+
+# Command line overrides config, config overrides defaults
+if [[ -n "$OPT_HOOK_DIR" ]]; then
+  HOOK_DIR=$OPT_HOOK_DIR
+fi
+if [[ -n "$OPT_SETTLE_TIME" ]]; then
+  SETTLE_TIME=$OPT_SETTLE_TIME
+fi
+if [[ -z "$HOOK_DIR" ]]; then
+  HOOK_DIR="$XDG_CONFIG_HOME/nm-connectivity-hooks/hooks.d"
+fi
+if [[ -z "$SETTLE_TIME" ]]; then
+  SETTLE_TIME=3
+fi
+
+########################################################################
+# Some sanity checks
+
+if ! command -v gdbus &>/dev/null; then
+  echo "gdbus could not be found. Please install it (glib) to use this script."
+  exit 1
+fi
+if [[ ! -d "$HOOK_DIR" ]]; then
+  echo "Hook directory $HOOK_DIR does not exist. No hooks will be run."
+fi
+
+########################################################################
+# The main logic
+
+NM_DEST="org.freedesktop.NetworkManager"
+NM_PATH="/org/freedesktop/NetworkManager"
+
+# Maps the numeric NMConnectivityState to its name
+function state_name() {
+  case "$1" in
+  1) echo "none" ;;
+  2) echo "portal" ;;
+  3) echo "limited" ;;
+  4) echo "full" ;;
+  *) echo "unknown" ;;
+  esac
+}
+
+# Prints the current connectivity state of NetworkManager, e.g. "full"
+function get_state() {
+  local reply
+  reply=$(gdbus call --system --dest "$NM_DEST" --object-path "$NM_PATH" \
+    --method org.freedesktop.DBus.Properties.Get "$NM_DEST" Connectivity 2>/dev/null)
+  # The reply looks like "(<uint32 4>,)"
+  state_name "$(echo "$reply" | sed -n 's/.*uint32 \([0-9]\+\).*/\1/p')"
+}
+
+# Runs all hooks with $1 being the new and $2 being the old state
+function run_hooks() {
+  local hook rc
+  echo "Connectivity changed: ${2:-(startup)} -> $1"
+  for hook in "$HOOK_DIR"/*; do
+    # Skip non-executables and editor backup files
+    if [[ ! -f "$hook" || ! -x "$hook" || "$hook" == *~ ]]; then
+      continue
+    fi
+    echo "Running hook $hook"
+    NM_CONNECTIVITY_STATE="$1" NM_CONNECTIVITY_OLD_STATE="$2" "$hook" "$1" "$2"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+      echo "Hook $hook failed with exit status $rc"
+    fi
+  done
+}
+
+if [[ -n "$RUN_HOOKS" ]]; then
+  run_hooks "$RUN_HOOKS_NEW" "$RUN_HOOKS_OLD"
+  exit 0
+fi
+
+echo "Listening to dbus events..."
+
+LAST_STATE=""
+
+# NetworkManager announces changes of its properties via PropertiesChanged. We
+# do not parse the signal, but re-read the property after the settle time. The
+# first line of gdbus monitor tells us that monitoring is set up, which
+# triggers the initial run. The "owned by" line appears when NetworkManager
+# (re)starts.
+gdbus monitor --system --dest "$NM_DEST" --object-path "$NM_PATH" | while read -r line; do
+  if [[ "$line" != *Connectivity* && "$line" != "Monitoring signals"* && "$line" != *"is owned by"* ]]; then
+    continue
+  fi
+
+  sleep "$SETTLE_TIME"
+  state=$(get_state)
+  if [[ "$state" != "$LAST_STATE" ]]; then
+    run_hooks "$state" "$LAST_STATE"
+    LAST_STATE=$state
+  fi
+done
