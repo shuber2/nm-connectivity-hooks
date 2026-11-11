@@ -80,7 +80,7 @@ The Akonadi EWS resource, which syncs Exchange and Office 365 mail and
 calendars in KDE PIM, does not back off when the network is unreachable. On a
 WiFi without uplink it retries in a tight loop, logging thousands of `Failed to
 process EWS request: Network unreachable` messages per second and keeping the
-CPU busy.
+CPU busy. See KDE [bug 422410](https://bugs.kde.org/show_bug.cgi?id=422410).
 
 The hook `hooks/akonadi-offline` takes the matching Akonadi resources offline
 while connectivity is `none`, `portal`, or `limited`, and brings them back

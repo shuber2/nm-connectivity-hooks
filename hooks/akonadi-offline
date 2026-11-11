@@ -9,7 +9,8 @@
 # Motivation: The Akonadi EWS resource (Exchange, Office 365) does not back off
 # when the network is unreachable. On a WiFi without uplink it retries in a
 # tight loop, logging thousands of "Failed to process EWS request: Network
-# unreachable" per second and burning CPU.
+# unreachable" per second and burning CPU. See KDE bug 422410,
+# https://bugs.kde.org/show_bug.cgi?id=422410
 #
 # The resources are selected by the glob patterns in AKONADI_RESOURCES
 # (space-separated), which can be exported in nm-connectivity-hooks.conf:
