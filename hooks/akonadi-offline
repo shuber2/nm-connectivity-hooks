@@ -12,6 +12,9 @@
 # unreachable" per second and burning CPU. See KDE bug 422410,
 # https://bugs.kde.org/show_bug.cgi?id=422410
 #
+# This is fixed in kdepim-runtime 26.12 (KDE Gear 26.12.0), so the hook is
+# only needed for older versions.
+#
 # The resources are selected by the glob patterns in AKONADI_RESOURCES
 # (space-separated), which can be exported in nm-connectivity-hooks.conf:
 #

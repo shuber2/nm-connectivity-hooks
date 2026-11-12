@@ -82,6 +82,11 @@ WiFi without uplink it retries in a tight loop, logging thousands of `Failed to
 process EWS request: Network unreachable` messages per second and keeping the
 CPU busy. See KDE [bug 422410](https://bugs.kde.org/show_bug.cgi?id=422410).
 
+This is fixed in kdepim-runtime 26.12 (KDE Gear 26.12.0) by
+[MR !384](https://invent.kde.org/pim/kdepim-runtime/-/merge_requests/384): the
+EWS resource now backs off and goes offline by itself without full
+connectivity. The hook is only needed for older versions.
+
 The hook `hooks/akonadi-offline` takes the matching Akonadi resources offline
 while connectivity is `none`, `portal`, or `limited`, and brings them back
 online at `full`. While offline, the calendar is still readable from Akonadi's
